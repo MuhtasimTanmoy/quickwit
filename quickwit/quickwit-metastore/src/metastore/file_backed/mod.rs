@@ -43,11 +43,10 @@ use itertools::Itertools;
 use quickwit_common::ServiceStream;
 use quickwit_config::IndexTemplate;
 use quickwit_proto::metastore::{
-    serde_utils, AcquireShardsRequest, AcquireShardsResponse, AcquireShardsSubrequest,
-    AddSourceRequest, CreateIndexRequest, CreateIndexResponse, CreateIndexTemplateRequest,
-    DeleteIndexRequest, DeleteIndexTemplatesRequest, DeleteQuery, DeleteShardsRequest,
-    DeleteShardsResponse, DeleteShardsSubrequest, DeleteSourceRequest, DeleteSplitsRequest,
-    DeleteTask, EmptyResponse, EntityKind, FindIndexTemplateMatchesRequest,
+    serde_utils, AcquireShardsRequest, AcquireShardsResponse, AddSourceRequest, CreateIndexRequest,
+    CreateIndexResponse, CreateIndexTemplateRequest, DeleteIndexRequest,
+    DeleteIndexTemplatesRequest, DeleteQuery, DeleteShardsRequest, DeleteSourceRequest,
+    DeleteSplitsRequest, DeleteTask, EmptyResponse, EntityKind, FindIndexTemplateMatchesRequest,
     FindIndexTemplateMatchesResponse, GetIndexTemplateRequest, GetIndexTemplateResponse,
     IndexMetadataRequest, IndexMetadataResponse, IndexTemplateMatch, LastDeleteOpstampRequest,
     LastDeleteOpstampResponse, ListDeleteTasksRequest, ListDeleteTasksResponse,
@@ -787,48 +786,21 @@ impl MetastoreService for FileBackedMetastore {
         &mut self,
         request: AcquireShardsRequest,
     ) -> MetastoreResult<AcquireShardsResponse> {
-        let mut response = AcquireShardsResponse {
-            subresponses: Vec::with_capacity(request.subrequests.len()),
-        };
-        // We must group the subrequests by `index_uid` to mutate each index only once, since each
-        // mutation triggers an IO.
-        let grouped_subrequests: HashMap<IndexUid, Vec<AcquireShardsSubrequest>> = request
-            .subrequests
-            .into_iter()
-            .into_group_map_by(|subrequest| IndexUid::from(subrequest.index_uid.clone()));
-
-        for (index_uid, subrequests) in grouped_subrequests {
-            let subresponses = self
-                .mutate(index_uid, |index| index.acquire_shards(subrequests))
-                .await?;
-            response.subresponses.extend(subresponses);
-        }
+        let index_uid: IndexUid = request.index_uid.clone().into();
+        let response = self
+            .mutate(index_uid, |index| index.acquire_shards(request))
+            .await?;
         Ok(response)
     }
 
     async fn delete_shards(
         &mut self,
         request: DeleteShardsRequest,
-    ) -> MetastoreResult<DeleteShardsResponse> {
-        let mut subresponses = Vec::with_capacity(request.subrequests.len());
-
-        // We must group the subrequests by `index_uid` to mutate each index only once, since each
-        // mutation triggers an IO.
-        let grouped_subrequests: HashMap<IndexUid, Vec<DeleteShardsSubrequest>> = request
-            .subrequests
-            .into_iter()
-            .into_group_map_by(|subrequest| IndexUid::from(subrequest.index_uid.clone()));
-
-        for (index_uid, subrequests) in grouped_subrequests {
-            let subresponse = self
-                .mutate(index_uid, |index| {
-                    index.delete_shards(subrequests, request.force)
-                })
-                .await?;
-            subresponses.push(subresponse);
-        }
-        let response = DeleteShardsResponse {};
-        Ok(response)
+    ) -> MetastoreResult<EmptyResponse> {
+        let index_uid: IndexUid = request.index_uid.clone().into();
+        self.mutate(index_uid, |index| index.delete_shards(request))
+            .await?;
+        Ok(EmptyResponse {})
     }
 
     async fn list_shards(
