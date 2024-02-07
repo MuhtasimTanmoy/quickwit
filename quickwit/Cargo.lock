@@ -5875,7 +5875,6 @@ dependencies = [
  "dyn-clone",
  "fail",
  "flume",
- "fnv",
  "futures",
  "http 0.2.11",
  "hyper 0.14.28",

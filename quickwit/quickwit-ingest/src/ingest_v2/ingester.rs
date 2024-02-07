@@ -25,7 +25,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytesize::ByteSize;
-use fnv::FnvHashMap;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use mrecordlog::error::CreateQueueError;
@@ -213,7 +212,7 @@ impl Ingester {
 
     async fn init_replication_stream(
         &self,
-        replication_streams: &mut FnvHashMap<FollowerId, ReplicationStreamTaskHandle>,
+        replication_streams: &mut HashMap<FollowerId, ReplicationStreamTaskHandle>,
         leader_id: NodeId,
         follower_id: NodeId,
     ) -> IngestV2Result<ReplicationClient> {
