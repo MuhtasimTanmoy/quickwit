@@ -152,9 +152,9 @@ impl Ingester {
     ) -> IngestV2Result<()> {
         let queue_id = shard.queue_id();
         info!(
-            index_uid = shard.index_uid,
-            source = shard.source_id,
-            shard = %shard.shard_id(),
+            index_uid=shard.index_uid,
+            source_id=shard.source_id,
+            shard_id=%shard.shard_id(),
             "init primary shard"
         );
         let Entry::Vacant(entry) = state.shards.entry(queue_id.clone()) else {
@@ -162,14 +162,15 @@ impl Ingester {
         };
         match mrecordlog.create_queue(&queue_id).await {
             Ok(_) => {}
-            Err(CreateQueueError::AlreadyExists) => panic!("queue should not exist"),
+            Err(CreateQueueError::AlreadyExists) => {
+                error!("WAL queue `{queue_id}` already exists");
+                let message = format!("WAL queue `{queue_id}` already exists");
+                return Err(IngestV2Error::Internal(message));
+            }
             Err(CreateQueueError::IoError(io_error)) => {
-                // TODO: Close all shards and set readiness to false.
-                error!(
-                    "failed to create mrecordlog queue `{}`: {}",
-                    queue_id, io_error
-                );
-                return Err(IngestV2Error::Internal(format!("Io Error: {io_error}")));
+                error!("failed to create WAL queue `{queue_id}`: {io_error}",);
+                let message = format!("failed to create WAL queue `{queue_id}`: {io_error}");
+                return Err(IngestV2Error::Internal(message));
             }
         };
         let rate_limiter = RateLimiter::from_settings(self.rate_limiter_settings);
@@ -330,7 +331,8 @@ impl Ingester {
 
         // first verify if we would locally accept each subrequest
         {
-            let mut sum_of_requested_capacity = bytesize::ByteSize::b(0);
+            let mut total_requested_capacity = bytesize::ByteSize::b(0);
+
             for subrequest in persist_request.subrequests {
                 let queue_id = subrequest.queue_id();
 
@@ -380,29 +382,26 @@ impl Ingester {
                 };
                 let requested_capacity = estimate_size(&doc_batch);
 
-                match check_enough_capacity(
+                if let Err(error) = check_enough_capacity(
                     &state_guard.mrecordlog,
                     self.disk_capacity,
                     self.memory_capacity,
-                    requested_capacity + sum_of_requested_capacity,
+                    requested_capacity + total_requested_capacity,
                 ) {
-                    Ok(_usage) => (),
-                    Err(error) => {
-                        rate_limited_warn!(
-                            limit_per_min = 10,
-                            "failed to persist records to ingester `{}`: {error}",
-                            self.self_node_id
-                        );
-                        let persist_failure = PersistFailure {
-                            subrequest_id: subrequest.subrequest_id,
-                            index_uid: subrequest.index_uid,
-                            source_id: subrequest.source_id,
-                            shard_id: subrequest.shard_id,
-                            reason: PersistFailureReason::ResourceExhausted as i32,
-                        };
-                        persist_failures.push(persist_failure);
-                        continue;
-                    }
+                    rate_limited_warn!(
+                        limit_per_min = 10,
+                        "failed to persist records to ingester `{}`: {error}",
+                        self.self_node_id
+                    );
+                    let persist_failure = PersistFailure {
+                        subrequest_id: subrequest.subrequest_id,
+                        index_uid: subrequest.index_uid,
+                        source_id: subrequest.source_id,
+                        shard_id: subrequest.shard_id,
+                        reason: PersistFailureReason::ResourceExhausted as i32,
+                    };
+                    persist_failures.push(persist_failure);
+                    continue;
                 };
 
                 let (rate_limiter, rate_meter) = state_guard
@@ -426,7 +425,7 @@ impl Ingester {
 
                 let batch_num_bytes = doc_batch.num_bytes() as u64;
                 rate_meter.update(batch_num_bytes);
-                sum_of_requested_capacity += requested_capacity;
+                total_requested_capacity += requested_capacity;
 
                 if let Some(follower_id) = follower_id_opt {
                     let replicate_subrequest = ReplicateSubrequest {
@@ -618,18 +617,15 @@ impl Ingester {
 
                 shard.shard_state = ShardState::Closed;
                 shard.notify_shard_status();
+                warn!("closed shard `{queue_id}` following IO error");
             }
-            info!(
-                "closed {} shard(s) following IO error(s)",
-                shards_to_close.len()
-            );
         }
         if !shards_to_delete.is_empty() {
             for queue_id in &shards_to_delete {
                 state_guard.shards.remove(queue_id);
                 state_guard.rate_trackers.remove(queue_id);
+                warn!("deleted dangling shard `{queue_id}`");
             }
-            info!("deleted {} dangling shard(s)", shards_to_delete.len());
         }
 
         INGEST_V2_METRICS
@@ -1535,10 +1531,13 @@ mod tests {
         );
     }
 
-    // This test should be run manually and independently of other tests with the `fail/failpoints`
-    // feature enabled.
+    // This test should be run manually and independently of other tests with the `failpoints`
+    // feature enabled:
+    // ```sh
+    // cargo test -p quickwit-ingest --features failpoints -- test_ingester_persist_closes_shard_on_io_error
+    // ```
+    #[cfg(feature = "failpoints")]
     #[tokio::test]
-    #[ignore]
     async fn test_ingester_persist_closes_shard_on_io_error() {
         let scenario = fail::FailScenario::setup();
         fail::cfg("ingester:append_records", "return").unwrap();
