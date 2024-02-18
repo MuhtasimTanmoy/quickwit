@@ -19,10 +19,12 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::ops::Mul;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use bytesize::ByteSize;
 use futures::stream::FuturesUnordered;
 use futures::{Future, StreamExt};
 use quickwit_common::pubsub::{EventBroker, EventSubscriber};
@@ -37,7 +39,7 @@ use quickwit_proto::ingest::ingester::{
 use quickwit_proto::ingest::router::{IngestRequestV2, IngestResponseV2, IngestRouterService};
 use quickwit_proto::ingest::{CommitTypeV2, IngestV2Error, IngestV2Result, ShardIds, ShardState};
 use quickwit_proto::types::{IndexUid, NodeId, ShardId, SourceId, SubrequestId};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Semaphore};
 use tracing::{error, info, warn};
 
 use super::broadcast::LocalShardsUpdate;
@@ -45,7 +47,6 @@ use super::ingester::PERSIST_REQUEST_TIMEOUT;
 use super::routing_table::RoutingTable;
 use super::workbench::IngestWorkbench;
 use super::IngesterPool;
-use crate::semaphore_with_waiter::SemaphoreWithMaxWaiters;
 use crate::LeaderId;
 
 /// Duration after which ingest requests time out with [`IngestV2Error::Timeout`].
@@ -66,7 +67,8 @@ pub struct IngestRouter {
     ingester_pool: IngesterPool,
     state: Arc<RwLock<RouterState>>,
     replication_factor: usize,
-    write_semaphore: SemaphoreWithMaxWaiters,
+    // Limits the number of ingest requests in-flight to some capacity in bytes.
+    ingest_semaphore: Arc<Semaphore>,
 }
 
 struct RouterState {
@@ -87,6 +89,7 @@ impl IngestRouter {
         self_node_id: NodeId,
         control_plane: ControlPlaneServiceClient,
         ingester_pool: IngesterPool,
+        content_length_limit: ByteSize,
         replication_factor: usize,
     ) -> Self {
         let state = Arc::new(RwLock::new(RouterState {
@@ -95,13 +98,17 @@ impl IngestRouter {
                 table: HashMap::default(),
             },
         }));
+        let ingest_semaphore_capacity = content_length_limit
+            .mul(10u64)
+            .clamp(ByteSize::mib(128), ByteSize::mib(256))
+            .as_u64() as usize;
         Self {
             self_node_id,
             control_plane,
             ingester_pool,
             state,
             replication_factor,
-            write_semaphore: SemaphoreWithMaxWaiters::new(1, 10),
+            ingest_semaphore: Arc::new(Semaphore::new(ingest_semaphore_capacity)),
         }
     }
 
@@ -414,11 +421,24 @@ impl IngestRouterService for IngestRouter {
         &mut self,
         ingest_request: IngestRequestV2,
     ) -> IngestV2Result<IngestResponseV2> {
+        let ingest_request_size_bytes = ingest_request
+            .subrequests
+            .iter()
+            .map(|subrequest| {
+                subrequest
+                    .doc_batch
+                    .as_ref()
+                    .map(|doc_batch| doc_batch.doc_buffer.len() as u32)
+                    .unwrap_or(0)
+            })
+            .sum();
+
         let _permit = self
-            .write_semaphore
-            .acquire()
-            .await
-            .map_err(|()| IngestV2Error::TooManyRequests)?;
+            .ingest_semaphore
+            .clone()
+            .try_acquire_many_owned(ingest_request_size_bytes)
+            .map_err(|_| IngestV2Error::TooManyRequests)?;
+
         self.ingest_timeout(ingest_request, INGEST_REQUEST_TIMEOUT)
             .await
     }
@@ -522,11 +542,13 @@ mod tests {
         let self_node_id = "test-router".into();
         let control_plane: ControlPlaneServiceClient = ControlPlaneServiceClient::mock().into();
         let ingester_pool = IngesterPool::default();
+        let content_length_limit = ByteSize::mib(10);
         let replication_factor = 1;
         let router = IngestRouter::new(
             self_node_id,
             control_plane,
             ingester_pool.clone(),
+            content_length_limit,
             replication_factor,
         );
         let mut workbench = IngestWorkbench::default();
@@ -740,11 +762,13 @@ mod tests {
             });
         let control_plane: ControlPlaneServiceClient = control_plane_mock.into();
         let ingester_pool = IngesterPool::default();
+        let content_length_limit = ByteSize::mib(10);
         let replication_factor = 1;
         let mut router = IngestRouter::new(
             self_node_id,
             control_plane,
             ingester_pool.clone(),
+            content_length_limit,
             replication_factor,
         );
         let get_or_create_open_shards_request = GetOrCreateOpenShardsRequest {
@@ -852,11 +876,13 @@ mod tests {
         let self_node_id = "test-router".into();
         let control_plane = ControlPlaneServiceClient::mock().into();
         let ingester_pool = IngesterPool::default();
+        let content_length_limit = ByteSize::mib(10);
         let replication_factor = 1;
         let mut router = IngestRouter::new(
             self_node_id,
             control_plane,
             ingester_pool.clone(),
+            content_length_limit,
             replication_factor,
         );
         let ingest_subrequests = vec![IngestSubrequest {
@@ -903,11 +929,13 @@ mod tests {
         let self_node_id = "test-router".into();
         let control_plane = ControlPlaneServiceClient::mock().into();
         let ingester_pool = IngesterPool::default();
+        let content_length_limit = ByteSize::mib(10);
         let replication_factor = 1;
         let mut router = IngestRouter::new(
             self_node_id,
             control_plane,
             ingester_pool.clone(),
+            content_length_limit,
             replication_factor,
         );
         let ingest_subrequests = vec![IngestSubrequest {
@@ -954,11 +982,13 @@ mod tests {
         let self_node_id = "test-router".into();
         let control_plane = ControlPlaneServiceClient::mock().into();
         let ingester_pool = IngesterPool::default();
+        let content_length_limit = ByteSize::mib(10);
         let replication_factor = 1;
         let mut router = IngestRouter::new(
             self_node_id,
             control_plane,
             ingester_pool.clone(),
+            content_length_limit,
             replication_factor,
         );
         let index_uid: IndexUid = IndexUid::for_test("test-index-0", 0);
@@ -1046,11 +1076,13 @@ mod tests {
             IngesterServiceClient::mock().into(),
         );
 
+        let content_length_limit = ByteSize::mib(10);
         let replication_factor = 1;
         let mut router = IngestRouter::new(
             self_node_id,
             control_plane,
             ingester_pool.clone(),
+            content_length_limit,
             replication_factor,
         );
         let ingest_subrequests = vec![
@@ -1124,11 +1156,13 @@ mod tests {
         let self_node_id = "test-router".into();
         let control_plane = ControlPlaneServiceClient::mock().into();
         let ingester_pool = IngesterPool::default();
+        let content_length_limit = ByteSize::mib(10);
         let replication_factor = 1;
         let mut router = IngestRouter::new(
             self_node_id,
             control_plane,
             ingester_pool.clone(),
+            content_length_limit,
             replication_factor,
         );
         let index_uid: IndexUid = IndexUid::for_test("test-index-0", 0);
@@ -1338,11 +1372,13 @@ mod tests {
         let self_node_id = "test-router".into();
         let control_plane = ControlPlaneServiceClient::mock().into();
         let ingester_pool = IngesterPool::default();
+        let content_length_limit = ByteSize::mib(10);
         let replication_factor = 1;
         let mut router = IngestRouter::new(
             self_node_id,
             control_plane,
             ingester_pool.clone(),
+            content_length_limit,
             replication_factor,
         );
         let mut state_guard = router.state.write().await;
@@ -1445,11 +1481,13 @@ mod tests {
         let self_node_id = "test-router".into();
         let control_plane = ControlPlaneServiceClient::mock().into();
         let ingester_pool = IngesterPool::default();
+        let content_length_limit = ByteSize::mib(10);
         let replication_factor = 1;
         let router = IngestRouter::new(
             self_node_id,
             control_plane,
             ingester_pool.clone(),
+            content_length_limit,
             replication_factor,
         );
         let event_broker = EventBroker::default();

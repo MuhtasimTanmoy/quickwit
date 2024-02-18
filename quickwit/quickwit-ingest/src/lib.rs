@@ -30,7 +30,6 @@ mod metrics;
 mod notifications;
 mod position;
 mod queue;
-mod semaphore_with_waiter;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
