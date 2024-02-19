@@ -236,6 +236,10 @@ fn convert_scheduling_solution_to_physical_plan_single_node_single_source(
                     .take(max_shard_in_pipeline)
                     .cloned()
                     .collect();
+                if shard_ids.is_empty() {
+                    // No shard have been retained. We can remove the pipeline.
+                    continue;
+                }
                 remaining_num_shards_to_schedule_on_node -= shard_ids.len() as u32;
                 let new_task = IndexingTask {
                     index_uid: previous_task.index_uid.clone(),
@@ -301,7 +305,12 @@ fn convert_scheduling_solution_to_physical_plan_single_node(
                 indexer_assigment.num_shards(source_ord)
             } else {
                 // This can happen for IngestV1
-                1u32
+                if let SourceToScheduleType::IngestV1 = source.source_type {
+                    1u32
+                } else {
+                    error!("Source not found in the id_to_ord_map.");
+                    0u32
+                }
             };
         let source_pipelines: Vec<&IndexingTask> = previous_tasks
             .iter()

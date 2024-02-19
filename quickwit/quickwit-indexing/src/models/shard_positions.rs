@@ -28,7 +28,7 @@ use quickwit_cluster::{Cluster, ListenerHandle};
 use quickwit_common::pubsub::{Event, EventBroker};
 use quickwit_proto::indexing::ShardPositionsUpdate;
 use quickwit_proto::types::{Position, ShardId, SourceUid};
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 /// Prefix used in chitchat to publish the shard positions.
 const SHARD_POSITIONS_PREFIX: &str = "indexer.shard_positions:";
@@ -172,6 +172,7 @@ impl Handler<ClusterShardPositionsUpdate> for ShardPositionsService {
         update: ClusterShardPositionsUpdate,
         _ctx: &ActorContext<Self>,
     ) -> Result<Self::Reply, ActorExitStatus> {
+        info!(update=?update, "cluster shard position update");
         let ClusterShardPositionsUpdate {
             source_uid,
             shard_positions,
@@ -193,6 +194,7 @@ impl Handler<LocalShardPositionsUpdate> for ShardPositionsService {
         update: LocalShardPositionsUpdate,
         _ctx: &ActorContext<Self>,
     ) -> Result<(), ActorExitStatus> {
+        info!(update=?update, "local shard position update");
         let LocalShardPositionsUpdate {
             source_uid,
             shard_positions,
@@ -252,17 +254,24 @@ impl ShardPositionsService {
             .entry(source_uid.clone())
             .or_default();
 
-        let updated_positions_per_shard = published_positions_per_shard
+        let updated_positions_per_shard: Vec<_> = published_positions_per_shard
             .into_iter()
             .filter(|(shard, new_position)| {
                 let Some(position) = current_shard_positions.get(shard) else {
+                    // the key does not exist to begin with.
                     return true;
                 };
                 new_position > position
             })
-            .collect::<Vec<_>>();
+            .collect();
 
-        for (shard, position) in updated_positions_per_shard.iter() {
+
+        for (shard, position) in &updated_positions_per_shard {
+            let previous = current_shard_positions.get(shard);
+            info!(shard=?shard, position=%position, previous=?previous, "updating shard position");
+            if format!("{position}").is_empty() {
+                error!(shard=?shard, position=%position, previous=?previous, "updating shard position (serializes as empty)");
+            }
             current_shard_positions.insert(shard.clone(), position.clone());
         }
 

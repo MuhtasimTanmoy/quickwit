@@ -303,9 +303,9 @@ impl ControlPlane {
     /// This method includes some debouncing logic. Every call will be followed by a cooldown
     /// period.
     fn rebuild_plan_debounced(&mut self, _ctx: &ActorContext<Self>) {
-        self.indexing_scheduler.rebuild_plan(&self.model);
-        // self.rebuild_plan_debouncer
-        //     .self_send_with_cooldown::<RebuildPlan>(ctx);
+        // self.indexing_scheduler.rebuild_plan(&self.model);
+        self.rebuild_plan_debouncer
+            .self_send_with_cooldown::<RebuildPlan>(ctx);
     }
 }
 

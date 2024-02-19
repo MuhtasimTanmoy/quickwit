@@ -74,11 +74,6 @@ impl From<usize> for Offset {
     }
 }
 
-impl From<&str> for Offset {
-    fn from(offset: &str) -> Self {
-        Self(ByteString::from(offset))
-    }
-}
 
 /// Marks a position within a specific partition/shard of a source.
 ///
@@ -278,6 +273,8 @@ impl prost::Message for Position {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use prost::Message;
 
     use super::*;
@@ -387,5 +384,32 @@ mod tests {
             Position::decode_length_delimited(Bytes::from(encoded)).unwrap(),
             Position::eof(0u64)
         );
+    }
+
+    #[test]
+    fn test_position_ord2() {
+        let test = r#"{"hello":""}"#;
+        let positions: HashMap<String, Position> = serde_json::from_str(test).unwrap();
+        assert_eq!(positions.get("hello").unwrap(), Position::Beginning);
+        {
+            let left = Position::Beginning;
+            let right: Position = Position::Eof(Some(Offset::from(0i64)));
+            assert!(left<right);
+        }
+        {
+            let left = Position::Beginning;
+            let right: Position = Position::Eof(None);
+            assert!(left<right);
+        }
+        {
+            let left = Position::Beginning;
+            let right: Position = Position::Offset(Offset::from(0i64));
+            assert!(left<right);
+        }
+        {
+            let left = Position::Beginning;
+            let right: Position = Position::Offset(Offset::from(0i64));
+            assert!(left<right);
+        }
     }
 }
